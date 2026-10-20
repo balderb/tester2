@@ -1,10 +1,9 @@
 package com.balderb.research.shell;
 
 import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.List;
-import java.util.stream.Collectors;
 
 import org.springframework.shell.core.command.annotation.Argument;
 import org.springframework.shell.core.command.annotation.Command;
@@ -12,11 +11,11 @@ import org.springframework.shell.core.command.annotation.Option;
 import org.springframework.stereotype.Component;
 
 import com.balderb.research.analysis.AnalysisReport;
-import com.balderb.research.analysis.ResearchAssistant;
 import com.balderb.research.analysis.ReasoningStep;
-import com.balderb.research.schema.ColumnInfo;
-import com.balderb.research.schema.SchemaService;
-import com.balderb.research.schema.TableInfo;
+import com.balderb.research.analysis.ResearchAssistant;
+import com.balderb.research.data.ColumnInfo;
+import com.balderb.research.data.Dataset;
+import com.balderb.research.data.DatasetProvider;
 
 /**
  * The commands you can type in the shell. Each method annotated with {@link Command} is one command.
@@ -24,30 +23,32 @@ import com.balderb.research.schema.TableInfo;
 @Component
 public class ResearchCommands {
 
-    private final SchemaService schemaService;
+    private final DatasetProvider datasetProvider;
     private final ResearchAssistant researchAssistant;
 
-    public ResearchCommands(SchemaService schemaService, ResearchAssistant researchAssistant) {
-        this.schemaService = schemaService;
+    public ResearchCommands(DatasetProvider datasetProvider, ResearchAssistant researchAssistant) {
+        this.datasetProvider = datasetProvider;
         this.researchAssistant = researchAssistant;
     }
 
-    @Command(name = "tables", description = "List the tables in the database", group = "Research")
-    public String tables() {
-        List<TableInfo> tables = schemaService.listTables();
-        if (tables.isEmpty()) {
-            return "The database has no tables.";
+    @Command(name = "load", description = "Switch to another CSV file", group = "Research")
+    public String load(@Argument(index = 0, description = "path to the CSV file") String file) {
+        try {
+            return "Loaded.\n\n" + formatDataset(datasetProvider.load(Path.of(file)));
         }
-        return tables.stream()
-                .map(table -> "%-25s %d columns".formatted(table.name(), table.columns().size()))
-                .collect(Collectors.joining("\n"));
+        catch (IllegalArgumentException | UncheckedIOException e) {
+            return e.getMessage();
+        }
     }
 
-    @Command(name = "describe", description = "Show the columns of a table", group = "Research")
-    public String describe(@Argument(index = 0, description = "table name") String tableName) {
-        return schemaService.findTable(tableName)
-                .map(ResearchCommands::formatColumns)
-                .orElse("Unknown table: " + tableName + ". Use 'tables' to see the available tables.");
+    @Command(name = "describe", description = "Show the loaded file and its columns", group = "Research")
+    public String describe() {
+        try {
+            return formatDataset(datasetProvider.current());
+        }
+        catch (IllegalStateException e) {
+            return e.getMessage();
+        }
     }
 
     @Command(name = "ask", description = "Answer a research question with an R script and an explanation",
@@ -55,7 +56,14 @@ public class ResearchCommands {
     public String ask(@Argument(index = 0, description = "research question, in quotes") String question,
             @Option(longName = "save", description = "file to write the R script to") String savePath)
             throws IOException {
-        AnalysisReport report = researchAssistant.answer(question, schemaService.listTables());
+        Dataset dataset;
+        try {
+            dataset = datasetProvider.current();
+        }
+        catch (IllegalStateException e) {
+            return e.getMessage();
+        }
+        AnalysisReport report = researchAssistant.answer(question, dataset);
         String output = format(report);
         if (savePath != null && !savePath.isBlank()) {
             Path path = Path.of(savePath);
@@ -65,11 +73,14 @@ public class ResearchCommands {
         return output;
     }
 
-    private static String formatColumns(TableInfo table) {
-        StringBuilder out = new StringBuilder(table.name()).append("\n");
-        for (ColumnInfo column : table.columns()) {
-            out.append("  %-25s %-20s %s%n".formatted(column.name(), column.typeName(),
-                    column.nullable() ? "may be missing" : "required"));
+    private static String formatDataset(Dataset dataset) {
+        StringBuilder out = new StringBuilder();
+        out.append("File: ").append(dataset.file()).append("\n");
+        out.append("Rows: ").append(dataset.rowCount()).append("\n\n");
+        out.append("  %-25s %-8s %s%n".formatted("COLUMN", "TYPE", "MISSING"));
+        for (ColumnInfo column : dataset.columns()) {
+            out.append("  %-25s %-8s %d%n".formatted(column.name(), column.numeric() ? "number" : "text",
+                    column.missingCount()));
         }
         return out.toString();
     }
@@ -77,7 +88,7 @@ public class ResearchCommands {
     private static String format(AnalysisReport report) {
         StringBuilder out = new StringBuilder();
         out.append("Question: ").append(report.question()).append("\n");
-        out.append("Tables used: ").append(String.join(", ", report.tablesUsed())).append("\n\n");
+        out.append("Variables used: ").append(String.join(", ", report.variablesUsed())).append("\n\n");
         out.append("How I got to this output:\n");
         int number = 1;
         for (ReasoningStep step : report.steps()) {

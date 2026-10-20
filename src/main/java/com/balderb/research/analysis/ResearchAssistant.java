@@ -1,8 +1,6 @@
 package com.balderb.research.analysis;
 
-import java.util.List;
-
-import com.balderb.research.schema.TableInfo;
+import com.balderb.research.data.Dataset;
 
 /**
  * Turns a research question into an analysis plan.
@@ -13,5 +11,5 @@ import com.balderb.research.schema.TableInfo;
  */
 public interface ResearchAssistant {
 
-    AnalysisReport answer(String question, List<TableInfo> schema);
+    AnalysisReport answer(String question, Dataset dataset);
 }

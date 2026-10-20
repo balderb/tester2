@@ -2,7 +2,6 @@ package com.balderb.research.analysis;
 
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.Comparator;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
@@ -11,15 +10,15 @@ import java.util.stream.Collectors;
 
 import org.springframework.stereotype.Component;
 
-import com.balderb.research.schema.ColumnInfo;
-import com.balderb.research.schema.TableInfo;
+import com.balderb.research.data.ColumnInfo;
+import com.balderb.research.data.Dataset;
 
 /**
  * A simple, rule-based placeholder for the future AI agent.
  *
- * <p>It picks the tables and columns whose names share words with the question and writes an R
- * script with descriptive statistics for them. It does not understand the question; it only shows
- * the shape of the final product: a script plus an explanation of every choice.
+ * <p>It picks the columns whose names share words with the question and writes an R script with
+ * descriptive statistics for them. It does not understand the question; it only shows the shape of
+ * the final product: a script plus an explanation of every choice.
  */
 @Component
 public class KeywordResearchAssistant implements ResearchAssistant {
@@ -27,75 +26,78 @@ public class KeywordResearchAssistant implements ResearchAssistant {
     private static final int MIN_WORD_LENGTH = 3;
 
     @Override
-    public AnalysisReport answer(String question, List<TableInfo> schema) {
+    public AnalysisReport answer(String question, Dataset dataset) {
         List<ReasoningStep> steps = new ArrayList<>();
         Set<String> questionWords = words(question);
         steps.add(new ReasoningStep("Read the question",
                 "Keywords taken from the question: " + String.join(", ", questionWords)));
+        steps.add(new ReasoningStep("Read the data",
+                "%s has %d rows and %d columns.".formatted(dataset.file().getFileName(), dataset.rowCount(),
+                        dataset.columns().size())));
 
-        List<TableInfo> selected = new ArrayList<>();
-        List<ColumnInfo> matchedColumns = new ArrayList<>();
-        for (TableInfo table : schema) {
-            List<ColumnInfo> hits = table.columns().stream()
-                    .filter(column -> matches(column.name(), questionWords))
-                    .toList();
-            if (matches(table.name(), questionWords) || !hits.isEmpty()) {
-                selected.add(table);
-                matchedColumns.addAll(hits);
-                steps.add(new ReasoningStep("Selected table " + table.name(),
-                        hits.isEmpty()
-                                ? "The table name matches a keyword from the question."
-                                : "Columns matching the question: " + columnNames(hits) + "."));
-            }
+        List<ColumnInfo> selected = dataset.columns().stream()
+                .filter(column -> matches(column.name(), questionWords))
+                .toList();
+        if (selected.isEmpty()) {
+            selected = dataset.columns();
+            steps.add(new ReasoningStep("No matching variables",
+                    "No column name matched the question, so every column is described."));
+        }
+        else {
+            steps.add(new ReasoningStep("Selected variables",
+                    "Columns whose names match the question: " + columnNames(selected) + "."));
         }
 
-        if (selected.isEmpty()) {
-            selected.addAll(schema);
-            steps.add(new ReasoningStep("No matching tables",
-                    "No table or column name matched the question, so every table is described."));
+        for (ColumnInfo column : selected) {
+            if (column.missingCount() > 0) {
+                steps.add(new ReasoningStep("Missing values in " + column.name(),
+                        "%d of %d rows are empty; R leaves them out (na.rm = TRUE / useNA = \"ifany\")."
+                                .formatted(column.missingCount(), dataset.rowCount())));
+            }
         }
 
         steps.add(new ReasoningStep("Chose the analysis",
                 "Numeric columns get summary statistics (mean, standard deviation, quartiles); "
-                        + "other columns get frequency tables. Columns that matched the question are "
-                        + "described first: " + (matchedColumns.isEmpty() ? "none" : columnNames(matchedColumns)) + "."));
+                        + "other columns get frequency tables."));
         steps.add(new ReasoningStep("Not done yet",
-                "This placeholder does not choose statistical tests, joins tables or check assumptions. "
+                "This placeholder does not compare groups, choose statistical tests or check assumptions. "
                         + "That is the job of the future AI agent."));
 
-        List<String> tableNames = selected.stream().map(TableInfo::name).toList();
-        return new AnalysisReport(question, tableNames, steps, rScript(question, selected, matchedColumns));
+        List<String> variables = selected.stream().map(ColumnInfo::name).toList();
+        return new AnalysisReport(question, variables, steps, rScript(question, dataset, selected));
     }
 
-    private String rScript(String question, List<TableInfo> tables, List<ColumnInfo> matchedColumns) {
+    private String rScript(String question, Dataset dataset, List<ColumnInfo> columns) {
+        String variable = dataset.name();
         StringBuilder r = new StringBuilder();
         r.append("# Research question: ").append(question.replace('\n', ' ')).append("\n");
         r.append("# Generated by research-assistant (keyword placeholder). Review before use.\n\n");
-        r.append("library(DBI)\n\n");
-        r.append("# TODO: connect to your database, for example:\n");
-        r.append("# con <- dbConnect(RPostgres::Postgres(), dbname = \"mydb\")\n");
-        r.append("con <- NULL\n\n");
-        for (TableInfo table : tables) {
-            String variable = table.name().toLowerCase(Locale.ROOT);
-            r.append("# ---- ").append(table.name()).append(" ----\n");
-            r.append(variable).append(" <- dbGetQuery(con, \"SELECT * FROM ").append(table.name()).append("\")\n");
-            List<ColumnInfo> ordered = new ArrayList<>(table.columns());
-            ordered.sort(Comparator.comparing(column -> !matchedColumns.contains(column)));
-            for (ColumnInfo column : ordered) {
-                // Backticks keep the exact column name, whatever its case or characters
-                String ref = variable + "$`" + column.name() + "`";
-                if (column.numeric()) {
-                    r.append("summary(").append(ref).append(")\n");
-                    r.append("sd(").append(ref).append(", na.rm = TRUE)\n");
-                }
-                else {
-                    r.append("table(").append(ref).append(", useNA = \"ifany\")\n");
-                }
+        r.append(variable).append(" <- ").append(readCall(dataset)).append("\n\n");
+        for (ColumnInfo column : columns) {
+            // Backticks keep the exact column name, also when it contains spaces
+            String ref = variable + "$`" + column.name().replace("`", "\\`") + "`";
+            r.append("# ").append(column.name()).append("\n");
+            if (column.numeric()) {
+                r.append("summary(").append(ref).append(")\n");
+                r.append("sd(").append(ref).append(", na.rm = TRUE)\n\n");
             }
-            r.append("\n");
+            else {
+                r.append("table(").append(ref).append(", useNA = \"ifany\")\n\n");
+            }
         }
-        r.append("dbDisconnect(con)\n");
         return r.toString();
+    }
+
+    /** The R function that reads the file with the same delimiter and decimal mark as the Java side. */
+    private static String readCall(Dataset dataset) {
+        // Forward slashes work in R on every operating system, also on Windows
+        String path = dataset.file().toString().replace('\\', '/').replace("\"", "\\\"");
+        String function = switch (dataset.delimiter()) {
+            case ';' -> "read.csv2";   // ';' between values and ',' as decimal mark
+            case '\t' -> "read.delim";
+            default -> "read.csv";
+        };
+        return "%s(\"%s\", check.names = FALSE, fileEncoding = \"UTF-8-BOM\")".formatted(function, path);
     }
 
     private static Set<String> words(String text) {
@@ -106,7 +108,7 @@ public class KeywordResearchAssistant implements ResearchAssistant {
 
     /** A name like "life_satisfaction" matches when one of its parts is a keyword. */
     private static boolean matches(String name, Set<String> keywords) {
-        return words(name.replace('_', ' ')).stream().anyMatch(keywords::contains);
+        return words(name).stream().anyMatch(keywords::contains);
     }
 
     private static String columnNames(List<ColumnInfo> columns) {
