@@ -33,7 +33,8 @@ class KeywordResearchAssistantTest {
         String script = assistant.answer("life satisfaction and income", dataset).rScript();
 
         assertThat(script).contains(
-                "survey <- read.csv(\"/data/survey.csv\", check.names = FALSE, fileEncoding = \"UTF-8-BOM\")");
+                "survey <- read.csv(\"/data/survey.csv\", check.names = FALSE, na.strings = c(\"NA\", \"\"), "
+                        + "fileEncoding = \"UTF-8-BOM\")");
         assertThat(script).contains("summary(survey$`life_satisfaction`)");
         assertThat(script).contains("table(survey$`income_bracket`, useNA = \"ifany\")");
         assertThat(script).doesNotContain("`wave`");

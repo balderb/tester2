@@ -51,7 +51,7 @@ public class KeywordResearchAssistant implements ResearchAssistant {
         for (ColumnInfo column : selected) {
             if (column.missingCount() > 0) {
                 steps.add(new ReasoningStep("Missing values in " + column.name(),
-                        "%d of %d rows are empty; R leaves them out (na.rm = TRUE / useNA = \"ifany\")."
+                        "%d of %d rows are empty or NA. Summary statistics leave them out; frequency tables show them as NA."
                                 .formatted(column.missingCount(), dataset.rowCount())));
             }
         }
@@ -97,7 +97,9 @@ public class KeywordResearchAssistant implements ResearchAssistant {
             case '\t' -> "read.delim";
             default -> "read.csv";
         };
-        return "%s(\"%s\", check.names = FALSE, fileEncoding = \"UTF-8-BOM\")".formatted(function, path);
+        // na.strings: empty cells are missing in text columns too, matching the counts in 'describe'
+        return "%s(\"%s\", check.names = FALSE, na.strings = c(\"NA\", \"\"), fileEncoding = \"UTF-8-BOM\")"
+                .formatted(function, path);
     }
 
     private static Set<String> words(String text) {
