@@ -7,13 +7,17 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Locale;
+import java.util.Set;
+import java.util.regex.Pattern;
 
 import org.apache.commons.csv.CSVFormat;
 import org.apache.commons.csv.CSVParser;
 import org.apache.commons.csv.CSVRecord;
+import org.apache.commons.csv.DuplicateHeaderMode;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
@@ -24,26 +28,46 @@ import org.springframework.stereotype.Service;
  * <p>Handles the common variants: comma, semicolon or tab between values; a decimal comma when values
  * are separated by semicolons (as Excel does with Dutch settings); quoted values; and the invisible
  * byte order mark that Excel puts at the start of "CSV UTF-8" files.
+ *
+ * <p>Types and missing values follow the rules R uses in {@code read.csv}, so the generated script
+ * sees the same columns as this class: "NA" counts as missing, and only values R reads as numbers
+ * make a column numeric. Files that R would read wrongly without an error (rows with a different
+ * number of values than the header, duplicate column names) are refused.
  */
 @Service
 public class CsvDatasetProvider implements DatasetProvider {
 
     private static final char BYTE_ORDER_MARK = '﻿';
     private static final char[] DELIMITERS = {',', ';', '\t'};
+    /** R's default missing value marker in read.csv. */
+    private static final String R_MISSING = "NA";
+    /** Values R's read.csv turns into numbers: decimals, scientific notation, Inf, NaN and hex. */
+    private static final Pattern R_NUMBER = Pattern.compile(
+            "[+-]?(\\d+\\.?\\d*|\\.\\d+)([eE][+-]?\\d+)?|[+-]?(Inf|Infinity)|NaN|[+-]?0[xX][0-9a-fA-F]+");
 
     private Dataset current;
+    /** Why the configured file could not be loaded at startup, shown when a command needs the data. */
+    private String startupProblem = "";
 
-    /** Loads the configured file if it exists; otherwise the app starts empty and waits for 'load'. */
+    /**
+     * Loads the configured file if it exists and is valid. Otherwise the app still starts, without
+     * data, and waits for 'load'.
+     */
     public CsvDatasetProvider(@Value("${research.data-file:}") String dataFile) {
         if (!dataFile.isBlank() && Files.isRegularFile(Path.of(dataFile))) {
-            this.current = read(Path.of(dataFile));
+            try {
+                this.current = read(Path.of(dataFile));
+            }
+            catch (IllegalArgumentException | UncheckedIOException e) {
+                this.startupProblem = "Could not load " + dataFile + ": " + e.getMessage() + "\n";
+            }
         }
     }
 
     @Override
     public Dataset current() {
         if (current == null) {
-            throw new IllegalStateException("No CSV file loaded yet. Use: load <path-to-file.csv>");
+            throw new IllegalStateException(startupProblem + "No CSV file loaded yet. Use: load <path-to-file.csv>");
         }
         return current;
     }
@@ -66,19 +90,35 @@ public class CsvDatasetProvider implements DatasetProvider {
                     .setHeader()
                     .setSkipHeaderRecord(true)
                     .setTrim(true)
+                    .setDuplicateHeaderMode(DuplicateHeaderMode.ALLOW_ALL)
                     .get();
             try (Reader reader = Files.newBufferedReader(absolute, StandardCharsets.UTF_8);
                     CSVParser parser = CSVParser.parse(skipByteOrderMark(reader), format)) {
                 List<String> headers = parser.getHeaderNames();
+                if (headers.isEmpty()) {
+                    throw new IllegalArgumentException("The file is empty; expected a header row: " + absolute);
+                }
+                Set<String> seen = new HashSet<>();
+                for (String header : headers) {
+                    if (!seen.add(header)) {
+                        throw new IllegalArgumentException("The column name \"%s\" appears more than once. Give every column a unique name: R can only reach the first one."
+                                .formatted(header));
+                    }
+                }
                 int[] missing = new int[headers.size()];
                 boolean[] numeric = new boolean[headers.size()];
                 Arrays.fill(numeric, true);
                 int rows = 0;
                 for (CSVRecord record : parser) {
                     rows++;
+                    if (record.size() != headers.size()) {
+                        throw new IllegalArgumentException(
+                                "Data row %d has %d values, but the header has %d columns. Fix the file first: R would shift the values into the wrong columns without warning."
+                                        .formatted(rows, record.size(), headers.size()));
+                    }
                     for (int i = 0; i < headers.size(); i++) {
-                        String value = i < record.size() ? record.get(i) : "";
-                        if (value.isEmpty()) {
+                        String value = record.get(i);
+                        if (value.isEmpty() || value.equals(R_MISSING)) {
                             missing[i]++;
                         }
                         else if (numeric[i] && !isNumber(value, delimiter)) {
@@ -117,13 +157,7 @@ public class CsvDatasetProvider implements DatasetProvider {
     private static boolean isNumber(String value, char delimiter) {
         // With ';' between values, a comma is the decimal separator: "3,5" means 3.5
         String normalized = delimiter == ';' ? value.replace(',', '.') : value;
-        try {
-            Double.parseDouble(normalized);
-            return true;
-        }
-        catch (NumberFormatException e) {
-            return false;
-        }
+        return R_NUMBER.matcher(normalized).matches();
     }
 
     private static String firstLine(Path file) throws IOException {

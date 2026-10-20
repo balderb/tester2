@@ -49,6 +49,47 @@ class CsvDatasetProviderTest {
     }
 
     @Test
+    void treatsNaAsMissingLikeR() throws IOException {
+        Dataset dataset = CsvDatasetProvider.read(write("na.csv", "score\nNA\n7\n"));
+
+        assertThat(dataset.columns()).containsExactly(new ColumnInfo("score", true, 1));
+    }
+
+    @Test
+    void onlyCountsValuesAsNumbersWhenRDoes() throws IOException {
+        Dataset dataset = CsvDatasetProvider.read(write("numbers.csv", "a,b,c\n1.5e3,1d,-Inf\n-.5,2f,NaN\n"));
+
+        assertThat(dataset.columns()).extracting(ColumnInfo::numeric).containsExactly(true, false, true);
+    }
+
+    @Test
+    void refusesRowsWithTheWrongNumberOfValues() throws IOException {
+        Path file = write("ragged.csv", "a,b,c\n1,2,3\n4,5,6,7\n");
+
+        assertThatThrownBy(() -> CsvDatasetProvider.read(file))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("Data row 2 has 4 values, but the header has 3 columns");
+    }
+
+    @Test
+    void refusesDuplicateColumnNames() throws IOException {
+        Path file = write("duplicate.csv", "a,a\n1,2\n");
+
+        assertThatThrownBy(() -> CsvDatasetProvider.read(file))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("\"a\" appears more than once");
+    }
+
+    @Test
+    void refusesAnEmptyFile() throws IOException {
+        Path file = write("empty.csv", "");
+
+        assertThatThrownBy(() -> CsvDatasetProvider.read(file))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("empty");
+    }
+
+    @Test
     void loadSwitchesToAnotherFile() throws IOException {
         CsvDatasetProvider provider = new CsvDatasetProvider(write("first.csv", "a\n1\n").toString());
 
@@ -65,6 +106,15 @@ class CsvDatasetProviderTest {
                 .hasMessageContaining("load");
         assertThatThrownBy(() -> provider.load(folder.resolve("missing.csv")))
                 .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    void startsEmptyAndExplainsWhyWhenTheConfiguredFileIsInvalid() throws IOException {
+        CsvDatasetProvider provider = new CsvDatasetProvider(write("bad.csv", "a,b\n1\n").toString());
+
+        assertThatThrownBy(provider::current).isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("Data row 1 has 1 values")
+                .hasMessageContaining("load");
     }
 
     private Path write(String name, String content) throws IOException {

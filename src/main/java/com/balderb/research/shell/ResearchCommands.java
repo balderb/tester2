@@ -54,8 +54,10 @@ public class ResearchCommands {
     @Command(name = "ask", description = "Answer a research question with an R script and an explanation",
             group = "Research")
     public String ask(@Argument(index = 0, description = "research question, in quotes") String question,
-            @Option(longName = "save", description = "file to write the R script to") String savePath)
-            throws IOException {
+            @Option(longName = "save", description = "file to write the R script to") String savePath) {
+        if (question == null || question.isBlank()) {
+            return "Please give a research question, for example: ask \"Does trust in government differ by country?\"";
+        }
         Dataset dataset;
         try {
             dataset = datasetProvider.current();
@@ -66,9 +68,14 @@ public class ResearchCommands {
         AnalysisReport report = researchAssistant.answer(question, dataset);
         String output = format(report);
         if (savePath != null && !savePath.isBlank()) {
-            Path path = Path.of(savePath);
-            Files.writeString(path, report.rScript());
-            output += "\nR script saved to " + path.toAbsolutePath();
+            Path path = Path.of(savePath).toAbsolutePath();
+            try {
+                Files.writeString(path, report.rScript());
+                output += "\nR script saved to " + path;
+            }
+            catch (IOException e) {
+                output += "\nCould not save the R script to " + path + " (does the folder exist?)";
+            }
         }
         return output;
     }
